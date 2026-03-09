@@ -8,15 +8,17 @@
  *   (a) it is within a ground station's horizon, OR
  *   (b) it is within a relay sat's commsRadius AND that relay sat is itself in comms.
  *
- * We resolve iteratively until no new satellites are added (handles multi-hop chains).
+ * Jamming: active jammers block enemy satellite comms in their radius,
+ * and can disrupt enemy targeting.
  */
 const Comms = {
     /**
      * Update inComms flag for all player satellites.
      * @param {GroundStation[]} groundStations
-     * @param {Satellite[]}     satellites  — all satellites (we only tag player ones)
+     * @param {Satellite[]}     satellites
+     * @param {Array}           activeJammers - [{x, y, radius, timer}]
      */
-    update(groundStations, satellites) {
+    update(groundStations, satellites, activeJammers) {
         const playerSats = satellites.filter(s => s.faction === 'player' && s.alive);
         const relays     = playerSats.filter(s => s.type === 'relay');
 
@@ -38,7 +40,7 @@ const Comms = {
         while (changed) {
             changed = false;
             for (const relay of relays) {
-                if (!relay.inComms) continue;   // relay itself must be reachable
+                if (!relay.inComms) continue;
                 for (const sat of playerSats) {
                     if (sat.inComms) continue;
                     if (Comms._relayCanReach(relay, sat)) {
@@ -48,17 +50,29 @@ const Comms = {
                 }
             }
         }
+
+        // Step 3: jamming — disrupt enemy satellites in jammer radius
+        const enemySats = satellites.filter(s => s.faction === 'enemy' && s.alive);
+        enemySats.forEach(s => { s._jammed = false; });
+        if (activeJammers && activeJammers.length > 0) {
+            for (const jammer of activeJammers) {
+                for (const enemy of enemySats) {
+                    const d = Utils.dist(jammer.x, jammer.y, enemy.x, enemy.y);
+                    if (d < jammer.radius) {
+                        enemy.inComms = false;
+                        enemy._jammed = true;
+                    }
+                }
+            }
+        }
     },
 
     /** Ground station can reach sat if sat is within the horizon cone */
     _groundCanReach(gs, sat) {
-        const d = Utils.dist(0, 0, sat.x, sat.y);  // dist from Earth center
+        const d = Utils.dist(0, 0, sat.x, sat.y);
         if (d > CONFIG.GROUND_COMMS_HORIZON) return false;
-
-        // Angular separation between ground station and satellite (as seen from center)
         const satAngle = Math.atan2(sat.y, sat.x);
         const diff = Math.abs(Utils.angleDiff(gs.angle, satAngle));
-        // Ground station covers ~130° arc (65° each side from its longitude)
         return diff < Utils.deg2rad(65);
     },
 
@@ -69,7 +83,6 @@ const Comms = {
 
     /**
      * Returns true if a given satellite can currently be tasked.
-     * (Must be player-owned and in comms.)
      */
     canTask(sat) {
         return sat && sat.faction === 'player' && sat.alive && sat.inComms;
