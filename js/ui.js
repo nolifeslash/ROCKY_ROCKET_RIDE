@@ -1,0 +1,351 @@
+'use strict';
+
+const UI = {
+    game:   null,
+    canvas: null,
+
+    init(game, canvas) {
+        this.game   = game;
+        this.canvas = canvas;
+        this._buildPanels();
+        this._bindEvents();
+        this.refresh();
+    },
+
+    // ── Panel Setup ──────────────────────────────────────────────────────────
+
+    _buildPanels() {
+        const lp = document.getElementById('launchPanel');
+        lp.style.display = 'none';
+        lp.innerHTML = this._launchPanelHTML();
+        document.getElementById('btnConfirmLaunch').addEventListener('click', () => this._doLaunch());
+        document.getElementById('btnCancelLaunch').addEventListener('click', () => {
+            lp.style.display = 'none';
+        });
+    },
+
+    _launchPanelHTML() {
+        let orbitOpts = '';
+        for (const key of Object.keys(CONFIG.ORBITS)) {
+            if (key === 'GRAVEYARD') continue;
+            orbitOpts += `<option value="${key}">${CONFIG.ORBITS[key].name}</option>`;
+        }
+        return `
+        <div class="panel-title">🚀 LAUNCH PAYLOAD</div>
+        <div class="panel-info">Ground station:</div>
+        <select id="gsSelect" class="launch-sel"></select>
+        <div class="panel-info" style="margin-top:6px">Orbit:</div>
+        <select id="orbitSelect" class="launch-sel">${orbitOpts}</select>
+        <div class="panel-info" style="margin-top:6px">Payload:</div>
+        <select id="payloadSelect" class="launch-sel">
+          <option value="utility">Utility  (₡${Utils.formatMoney(CONFIG.ROCKET_COST+CONFIG.PAYLOAD_COSTS.utility)})</option>
+          <option value="rpo">RPO Defender  (₡${Utils.formatMoney(CONFIG.ROCKET_COST+CONFIG.PAYLOAD_COSTS.rpo)})</option>
+          <option value="relay">Relay  (₡${Utils.formatMoney(CONFIG.ROCKET_COST+CONFIG.PAYLOAD_COSTS.relay)})</option>
+        </select>
+        <div id="launchCostPreview" class="panel-info" style="color:#ffdd44;margin-top:4px"></div>
+        <button id="btnConfirmLaunch" class="taskBtn green-btn" style="margin-top:8px;width:100%">✓ CONFIRM LAUNCH</button>
+        <button id="btnCancelLaunch"  class="taskBtn red-btn"   style="margin-top:3px;width:100%">✗ Cancel</button>`;
+    },
+
+    // ── Event Binding ────────────────────────────────────────────────────────
+
+    _bindEvents() {
+        this.canvas.addEventListener('click', e => this._onCanvasClick(e));
+        window.addEventListener('keydown', e => this._onKey(e));
+        document.getElementById('btnLaunch').addEventListener('click', () => this._toggleLaunch());
+        document.getElementById('btnScenario').addEventListener('click', () => {
+            const id = document.getElementById('scenarioSelect').value;
+            this.game.selectedSat = null;
+            loadScenario(this.game, id);
+            this.refresh();
+        });
+
+        // Dynamic cost preview in launch panel
+        document.getElementById('launchPanel').addEventListener('change', () => this._updateLaunchPreview());
+    },
+
+    _onCanvasClick(e) {
+        const rect  = this.canvas.getBoundingClientRect();
+        const sx    = this.canvas.width  / rect.width;
+        const sy    = this.canvas.height / rect.height;
+        const cx    = this.canvas.width  / 2;
+        const cy    = this.canvas.height / 2;
+        const wx    = (e.clientX - rect.left) * sx - cx;
+        const wy    = (e.clientY - rect.top)  * sy - cy;
+        const sat   = this.game.findSatNear(wx, wy, 22);
+        this.game.selectedSat = (this.game.selectedSat === sat) ? null : (sat || null);
+        this.refresh();
+    },
+
+    _onKey(e) {
+        const g = this.game;
+        switch (e.key.toLowerCase()) {
+            case ' ': case 'p':
+                e.preventDefault();
+                g.paused = !g.paused;
+                break;
+            case 'escape':
+                g.selectedSat = null;
+                this.refresh();
+                break;
+            case 'c':
+                g.showCoverage = !g.showCoverage;
+                break;
+            case 't':
+                g.showThreats = !g.showThreats;
+                break;
+            case 'r':
+                if (g.gameOver) window.location.reload();
+                break;
+            case 'n':
+                if (g.gameOver) {
+                    // Cycle to next scenario
+                    const ids  = Object.keys(SCENARIOS);
+                    const cur  = ids.indexOf(g.scenario ? g.scenario.id : 'scenario_01');
+                    const next = ids[(cur + 1) % ids.length];
+                    loadScenario(g, next);
+                    g.selectedSat = null;
+                    this.refresh();
+                }
+                break;
+        }
+    },
+
+    // ── Tick ─────────────────────────────────────────────────────────────────
+
+    tick() {
+        const sel = this.game.selectedSat;
+        if (sel && !sel.alive) {
+            this.game.selectedSat = null;
+            this.refresh();
+        }
+    },
+
+    // ── Refresh Right Panel ──────────────────────────────────────────────────
+
+    refresh() {
+        const sat   = this.game.selectedSat;
+        const panel = document.getElementById('taskPanel');
+        panel.innerHTML = sat && sat.alive
+            ? this._satInfoHTML(sat) + this._tasksHTML(sat)
+            : this._noSelHTML();
+    },
+
+    // ── No-selection panel ────────────────────────────────────────────────────
+
+    _noSelHTML() {
+        const sc = this.game.scenario;
+        const obj = sc && sc.objectives.length > 0 ? sc.objectives[0] : null;
+        return `
+        <div class="panel-title">RPO COMMAND</div>
+        ${obj ? `<div class="panel-info obj-box">📋 ${obj.label}</div>` : ''}
+        <div class="panel-hint">Click a satellite to select it.</div>
+        <hr class="phr"/>
+        <div class="panel-sub">LEGEND</div>
+        <div class="panel-legend">
+          <div><span class="ico ut"></span> Utility Sat — generates income</div>
+          <div><span class="ico rp"></span> RPO Defender — intercept / escort</div>
+          <div><span class="ico rl"></span> Relay Sat — extends comms</div>
+          <div><span class="ico en"></span> Enemy RPO Sat</div>
+        </div>
+        <hr class="phr"/>
+        <div class="panel-sub">OVERLAYS</div>
+        <div class="panel-hint">
+          [C] Toggle coverage overlay<br/>
+          [T] Toggle threat arrows
+        </div>
+        <hr class="phr"/>
+        <div class="panel-hint">[Space]/[P] Pause &nbsp; [Esc] Deselect</div>`;
+    },
+
+    // ── Satellite info ────────────────────────────────────────────────────────
+
+    _satInfoHTML(sat) {
+        const factionColor = sat.faction === 'player' ? 'green' : 'red';
+        const factionLabel = sat.faction === 'player' ? 'FRIENDLY' : 'ENEMY';
+        const commsColor   = sat.inComms ? 'green' : 'orange';
+        const commsLabel   = sat.inComms ? 'IN COMMS' : 'OUT OF COMMS';
+        const taskLabel    = sat.task    ? sat.task.type.toUpperCase() : 'NONE';
+        const dvWarn       = sat.deltaVWarning;
+        const dvColor      = dvWarn === 'critical' ? 'red' : dvWarn === 'low' ? 'orange' : 'cyan';
+        const dvPct        = Math.round(sat.deltaVPct * 100);
+        const thr          = CONFIG.THRUSTER_CLASSES[sat.thrusterClass] || {};
+
+        // Delta-V visual bar
+        const dvBar = `<div class="dv-bar-outer"><div class="dv-bar-fill dv-${dvWarn}" style="width:${dvPct}%"></div></div>`;
+
+        const warnMsg = dvWarn === 'critical'
+            ? `<div class="warn-crit">⚠ CRITICAL ΔV — maneuvers blocked!</div>`
+            : dvWarn === 'low'
+            ? `<div class="warn-low">⚠ Low ΔV — limited maneuvers</div>`
+            : '';
+
+        const svcPct = sat.serviceValue !== undefined ? Math.round(sat.serviceValue * 100) : 100;
+        const svcRow = sat.type === 'utility'
+            ? `<div class="panel-info">Service: <b style="color:#44ff88">${svcPct}%</b>${sat.safeMode ? ' <span style="color:#88ccff">[SAFE]</span>' : ''}</div>`
+            : '';
+
+        return `
+        <div class="panel-title">SAT-${sat.id} — ${sat.type.toUpperCase()}</div>
+        <div class="panel-info">Orbit: <b>${sat.orbit.name}</b></div>
+        <div class="panel-info">Faction: <span class="${factionColor}"><b>${factionLabel}</b></span></div>
+        <div class="panel-info">Comms: <span class="${commsColor}">${commsLabel}</span></div>
+        <div class="panel-info">Health: <b>${Math.max(0, Math.floor(sat.health))}%</b></div>
+        ${svcRow}
+        <div class="panel-info">Task: <span class="cyan">${taskLabel}</span></div>
+        <hr class="phr"/>
+        <div class="panel-sub">PROPULSION — ${thr.label || '?'}</div>
+        <div class="panel-info">ΔV: <span class="${dvColor}"><b>${Math.floor(sat.deltaV)} / ${sat.deltaVCapacity}</b></span></div>
+        ${dvBar}
+        ${warnMsg}
+        <hr class="phr"/>`;
+    },
+
+    // ── Task Buttons ──────────────────────────────────────────────────────────
+
+    _tasksHTML(sat) {
+        if (sat.faction === 'enemy') {
+            return `<div class="panel-hint">Enemy satellite — no tasks available.</div>`;
+        }
+        if (!sat.inComms) {
+            return `<div class="panel-hint warn">⚠ Out of comms range.<br/>Deploy a relay to extend coverage.</div>`;
+        }
+
+        let html = '<div class="panel-sub">AVAILABLE ORDERS</div>';
+
+        if (sat.type === 'utility') {
+            html += this._btn('emergency_dodge', null, '⚡ Emergency Dodge', sat,
+                `Shift orbit to escape threat [ΔV: ${CONFIG.DELTA_V_COSTS.emergency_dodge}]`,
+                CONFIG.DELTA_V_COSTS.emergency_dodge);
+            html += this._btn('safe_mode', null,
+                sat.safeMode ? '🔒 Exit Safe Mode' : '🛡 Enter Safe Mode',
+                sat, 'Reduces income 20% — improves survivability [ΔV: 0]', 0);
+        }
+
+        if (sat.type === 'rpo') {
+            // Intercept targets
+            const enemies = this.game.enemySats;
+            if (enemies.length > 0) {
+                html += '<div class="panel-sub" style="color:#ff8888">INTERCEPT ENEMY</div>';
+                enemies.forEach(en => {
+                    const d = Math.round(Utils.dist(sat.x, sat.y, en.x, en.y));
+                    html += this._btn('intercept', en.id,
+                        `⚔ Intercept ENE-${en.id}`,
+                        sat,
+                        `${en.orbit.name} — dist ${d}px [ΔV: ${CONFIG.DELTA_V_COSTS.intercept} + drain]`,
+                        CONFIG.DELTA_V_COSTS.intercept);
+                });
+            }
+
+            // Escort friendly utility sats
+            const utils = this.game.utilitySats;
+            if (utils.length > 0) {
+                html += '<div class="panel-sub" style="color:#44ccff">ESCORT FRIENDLY</div>';
+                utils.forEach(u => {
+                    html += this._btn('escort', u.id,
+                        `🛡 Escort UTI-${u.id}`,
+                        sat,
+                        `${u.orbit.name} [ΔV: ${CONFIG.DELTA_V_COSTS.escort_start} + drain]`,
+                        CONFIG.DELTA_V_COSTS.escort_start);
+                });
+            }
+
+            // Body-block (intercept an enemy to shield a utility sat)
+            if (enemies.length > 0) {
+                html += '<div class="panel-sub" style="color:#ffaa44">BODY BLOCK</div>';
+                enemies.forEach(en => {
+                    html += this._btn('body_block', en.id,
+                        `🚧 Body-block ENE-${en.id}`,
+                        sat,
+                        `Aggressive interposition [ΔV: ${CONFIG.DELTA_V_COSTS.body_block} + drain]`,
+                        CONFIG.DELTA_V_COSTS.body_block);
+                });
+            }
+
+            // Return to patrol
+            if (sat.task) {
+                html += this._btn('return', null, '↩ Return to Patrol', sat,
+                    'Cancel current task [ΔV: 0]', 0);
+            }
+        }
+
+        if (sat.type === 'relay') {
+            html += `<div class="panel-hint">Relay sats extend comms automatically.<br/>ΔV: ${Math.floor(sat.deltaV)}/${sat.deltaVCapacity} (reserve for repositioning).</div>`;
+        }
+
+        // Bind button events after inserting HTML
+        setTimeout(() => this._bindTaskBtns(sat), 0);
+        return html;
+    },
+
+    _btn(action, targetId, label, sat, subtitle, cost) {
+        const affordable = sat.canAfford(cost);
+        const disabled   = !affordable ? 'disabled title="Insufficient ΔV"' : '';
+        const cls        = !affordable ? 'taskBtn cant-afford' : 'taskBtn';
+        const data       = targetId !== null ? `data-target="${targetId}"` : '';
+        const postDV     = affordable ? `<span class="btn-post-dv">→ ΔV ${Math.floor(sat.deltaV - cost)}/${sat.deltaVCapacity}</span>` : `<span class="btn-post-dv warn-crit">✗ Need ΔV ${cost}</span>`;
+        return `
+        <button class="${cls}" data-action="${action}" ${data} ${disabled}>
+          <span class="btn-label">${label}</span>
+          <span class="btn-sub">${subtitle}</span>
+          ${postDV}
+        </button>`;
+    },
+
+    _bindTaskBtns(sat) {
+        const panel = document.getElementById('taskPanel');
+        panel.querySelectorAll('.taskBtn:not(.cant-afford)').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const action   = btn.dataset.action;
+                const targetId = btn.dataset.target ? parseInt(btn.dataset.target) : null;
+                this.game.taskSatellite(sat, action, targetId);
+                this.refresh();
+            });
+        });
+    },
+
+    // ── Launch Panel ──────────────────────────────────────────────────────────
+
+    _toggleLaunch() {
+        const lp = document.getElementById('launchPanel');
+        const open = lp.style.display !== 'none';
+        lp.style.display = open ? 'none' : 'block';
+        if (!open) {
+            // Populate ground stations
+            const sel = document.getElementById('gsSelect');
+            sel.innerHTML = '';
+            this.game.groundStations.forEach(gs => {
+                const o = document.createElement('option');
+                o.value = gs.id;
+                o.textContent = gs.name;
+                sel.appendChild(o);
+            });
+            this._updateLaunchPreview();
+        }
+    },
+
+    _updateLaunchPreview() {
+        const pay  = document.getElementById('payloadSelect');
+        const prev = document.getElementById('launchCostPreview');
+        if (!pay || !prev) return;
+        const payType = pay.value;
+        const cost    = CONFIG.ROCKET_COST + (CONFIG.PAYLOAD_COSTS[payType] || 0);
+        const can     = this.game.money >= cost;
+        prev.textContent = `Total cost: ₡${Utils.formatMoney(cost)} — Balance after: ₡${Utils.formatMoney(this.game.money - cost)}`;
+        prev.style.color = can ? '#ffdd44' : '#ff4444';
+        const btn = document.getElementById('btnConfirmLaunch');
+        if (btn) btn.disabled = !can;
+    },
+
+    _doLaunch() {
+        const gsId    = parseInt(document.getElementById('gsSelect').value);
+        const orbit   = document.getElementById('orbitSelect').value;
+        const payload = document.getElementById('payloadSelect').value;
+        const station = this.game.groundStations.find(g => g.id === gsId);
+        if (!station) return;
+        if (this.game.launchRocket(station, payload, orbit)) {
+            document.getElementById('launchPanel').style.display = 'none';
+        }
+        this.refresh();
+    },
+};
