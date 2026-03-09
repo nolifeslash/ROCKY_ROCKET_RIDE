@@ -10,39 +10,59 @@
 
 <div id="app">
 
-  <!-- ── Main game area ─────────────────────────────────────────────────── -->
   <div id="gameArea">
 
+    <!-- Canvas -->
     <div id="canvasWrapper">
       <canvas id="gameCanvas"></canvas>
     </div>
 
-    <!-- ── Right command panel ──────────────────────────────────────────── -->
+    <!-- Right panel -->
     <div id="sidePanel">
-      <div id="taskPanel">
-        <!-- Populated by ui.js -->
-      </div>
-      <div id="launchPanel">
-        <!-- Populated by ui.js -->
-      </div>
+      <div id="taskPanel"></div>
+      <div id="launchPanel"></div>
     </div>
 
   </div>
 
-  <!-- ── Bottom launch bar ──────────────────────────────────────────────── -->
+  <!-- Bottom toolbar -->
   <div id="launchBar">
-    <button id="btnLaunch">🚀 LAUNCH ROCKET</button>
-    <span>Select a ground station and payload in the panel above, then confirm.</span>
+
+    <!-- Left: rocket launch -->
+    <button id="btnLaunch">🚀 LAUNCH</button>
+
+    <!-- Centre: speed controls -->
+    <span class="bar-sep">|</span>
+    <span class="bar-label">SPEED:</span>
+    <button id="btn1x" class="speed-btn">1×</button>
+    <button id="btn2x" class="speed-btn">2×</button>
+    <button id="btn4x" class="speed-btn">4×</button>
+
+    <!-- Centre: scenario selector -->
+    <span class="bar-sep">|</span>
+    <span class="bar-label">SCENARIO:</span>
+    <select id="scenarioSelect" class="bar-select">
+      <option value="scenario_01">1 — First Contact</option>
+      <option value="sandbox">Sandbox</option>
+    </select>
+    <button id="btnScenario" class="bar-btn">▶ LOAD</button>
+
+    <!-- Right: key hints -->
+    <span style="margin-left:auto;font-size:9px;color:#334455">
+      [C] Coverage &nbsp;[T] Threats &nbsp;[Space] Pause &nbsp;[Esc] Deselect &nbsp;[R] Restart &nbsp;[N] Next
+    </span>
+
   </div>
 
 </div>
 
-<!-- Scripts — load order matters (no bundler) -->
+<!-- Load order matters — vanilla JS, no bundler -->
 <script src="js/config.js"></script>
 <script src="js/utils.js"></script>
 <script src="js/entities.js"></script>
 <script src="js/comms.js"></script>
 <script src="js/ai.js"></script>
+<script src="js/scenario.js"></script>
 <script src="js/game.js"></script>
 <script src="js/renderer.js"></script>
 <script src="js/ui.js"></script>

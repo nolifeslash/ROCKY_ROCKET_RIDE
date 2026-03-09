@@ -1,11 +1,11 @@
 'use strict';
 
-// ─── Base Entity ────────────────────────────────────────────────────────────
+// ─── Base Entity ─────────────────────────────────────────────────────────────
 
 class Entity {
     constructor(type) {
         this.id   = Utils.uid();
-        this.type = type;  // 'utility' | 'rpo' | 'relay' | 'enemy_rpo' | 'asat' | 'rocket' | 'debris' | 'groundstation'
+        this.type = type;
         this.x    = 0;
         this.y    = 0;
     }
@@ -14,71 +14,85 @@ class Entity {
 // ─── Ground Station ──────────────────────────────────────────────────────────
 
 class GroundStation extends Entity {
-    /**
-     * @param {string} name
-     * @param {number} longitude  degrees (0–360, east-positive)
-     */
     constructor(name, longitude) {
         super('groundstation');
         this.name      = name;
-        this.longitude = longitude;            // store for reference
+        this.longitude = longitude;
         this.angle     = Utils.deg2rad(longitude);
         this.active    = true;
         this._updatePos();
     }
-
     _updatePos() {
-        const r = CONFIG.EARTH_RADIUS;
-        this.x = Math.cos(this.angle) * r;
-        this.y = Math.sin(this.angle) * r;
+        this.x = Math.cos(this.angle) * CONFIG.EARTH_RADIUS;
+        this.y = Math.sin(this.angle) * CONFIG.EARTH_RADIUS;
     }
-
-    /** Coverage horizon as a distance from origin (ground station line-of-sight) */
-    get horizonRadius() { return CONFIG.GROUND_COMMS_HORIZON; }
 }
 
-// ─── Base Satellite ──────────────────────────────────────────────────────────
+// ─── Base Satellite ───────────────────────────────────────────────────────────
 
 class Satellite extends Entity {
-    /**
-     * @param {object} orbit   — orbit descriptor from CONFIG.ORBITS
-     * @param {number} angle   — initial angle (radians)
-     * @param {string} faction — 'player' | 'enemy'
-     */
     constructor(type, orbit, angle, faction) {
         super(type);
         this.orbit   = orbit;
         this.angle   = Utils.normalizeAngle(angle);
-        this.faction = faction;           // 'player' | 'enemy'
+        this.faction = faction;
         this.health  = 100;
         this.alive   = true;
-        this.inComms = false;             // set each frame by comms.js
-        this.task    = null;              // current task descriptor
-        this.status  = 'nominal';         // 'nominal' | 'maneuvering' | 'damaged'
+        this.inComms = false;
+        this.task    = null;
+        this.status  = 'nominal';
         this.angularVelocity = Utils.angularVelocity(orbit.period);
+
+        // ── Delta-V / fuel budget ──────────────────────────────────────────
+        const spec = CONFIG.SAT_BUDGETS[type] || CONFIG.SAT_BUDGETS.utility;
+        this.deltaVCapacity  = spec.deltaVCapacity;
+        this.deltaV          = spec.deltaVCapacity;   // current remaining
+        this.fuelUnits       = spec.deltaVCapacity;   // coupled display value
+        this.thrusterClass   = spec.thruster;
+        this.opCostPerSec    = spec.opCostPerSec;
+        this.maneuverCooldown = 0;
+
+        // Service value: income multiplier (1 = full, <1 = degraded)
+        this.serviceValue    = 1.0;
+
         this._updatePos();
     }
 
     _updatePos() {
-        const p = Utils.orbitPos(this.orbit.radius, this.angle);
-        this.x = p.x;
-        this.y = p.y;
+        this.x = Math.cos(this.angle) * this.orbit.radius;
+        this.y = Math.sin(this.angle) * this.orbit.radius;
     }
 
     update(dt) {
-        // Advance along orbit
         this.angle = Utils.normalizeAngle(this.angle + this.angularVelocity * dt);
         this._updatePos();
+        if (this.maneuverCooldown > 0) this.maneuverCooldown -= dt;
     }
+
+    // ── Delta-V helpers ───────────────────────────────────────────────────
+    get deltaVPct()     { return this.deltaVCapacity > 0 ? this.deltaV / this.deltaVCapacity : 0; }
+    get deltaVWarning() {
+        const p = this.deltaVPct;
+        if (p <= CONFIG.DELTA_V_WARN_CRITICAL) return 'critical';
+        if (p <= CONFIG.DELTA_V_WARN_LOW)      return 'low';
+        return 'ok';
+    }
+    canAfford(cost)     { return this.deltaV >= cost; }
+    spend(cost)         {
+        this.deltaV    = Math.max(0, this.deltaV - cost);
+        this.fuelUnits = this.deltaV;
+    }
+    get thrustMult()    { return (CONFIG.THRUSTER_CLASSES[this.thrusterClass] || CONFIG.THRUSTER_CLASSES.chemical).speedMult; }
 }
 
-// ─── Utility Satellite ───────────────────────────────────────────────────────
+// ─── Utility Satellite ────────────────────────────────────────────────────────
 
 class UtilitySat extends Satellite {
     constructor(orbit, angle) {
         super('utility', orbit, angle, 'player');
         this.moneyPerSecond = orbit.moneyRate;
-        this.escortedBy     = null;    // friendly RPO-sat id providing escort
+        this.safeMode       = false;
+        this.escortedById   = null;
     }
 }
 
@@ -87,13 +101,13 @@ class UtilitySat extends Satellite {
 class RPOSat extends Satellite {
     constructor(orbit, angle) {
         super('rpo', orbit, angle, 'player');
-        this.mode       = 'patrol';    // 'patrol' | 'intercept' | 'escort' | 'return'
-        this.targetId   = null;        // enemy RPO-sat (or utility sat to escort)
-        this.escorteeId = null;        // utility sat being escorted
+        this.mode       = 'patrol';
+        this.targetId   = null;
+        this.escorteeId = null;
     }
 }
 
-// ─── Relay Satellite ─────────────────────────────────────────────────────────
+// ─── Relay Satellite ──────────────────────────────────────────────────────────
 
 class RelaySat extends Satellite {
     constructor(orbit, angle) {
@@ -102,138 +116,106 @@ class RelaySat extends Satellite {
     }
 }
 
-// ─── Enemy RPO Satellite ─────────────────────────────────────────────────────
+// ─── Enemy RPO Satellite ──────────────────────────────────────────────────────
 
 class EnemyRPOSat extends Satellite {
     constructor(orbit, angle) {
         super('enemy_rpo', orbit, angle, 'enemy');
-        this.targetId   = null;        // player utility sat being pursued
-        this.mode       = 'approach';  // 'approach' | 'orbit' | 'retreat'
+        this.targetId = null;
+        this.mode     = 'approach';
     }
 
     update(dt, targetSat) {
         if (!this.alive) return;
-
-        if (targetSat && targetSat.alive) {
-            // Same orbit: close the angular gap
-            if (this.orbit.key === targetSat.orbit.key) {
-                const diff = Utils.angleDiff(this.angle, targetSat.angle);
-                const step = CONFIG.ENEMY_APPROACH_SPEED * dt;
-                this.angle = Utils.normalizeAngle(this.angle + Math.sign(diff) * step);
-            } else {
-                // Different orbit: drift on own orbit
-                this.angle = Utils.normalizeAngle(
-                    this.angle + this.angularVelocity * dt
-                );
-            }
-        } else {
+        if (targetSat && targetSat.alive && this.orbit.key === targetSat.orbit.key) {
+            // Natural orbital drift PLUS pursuit delta — enemy must co-orbit while closing
+            const diff        = Utils.angleDiff(this.angle, targetSat.angle);
+            const pursuitStep = CONFIG.ENEMY_APPROACH_SPEED * this.thrustMult * dt;
             this.angle = Utils.normalizeAngle(
-                this.angle + this.angularVelocity * dt
+                this.angle + this.angularVelocity * dt + Math.sign(diff) * pursuitStep
             );
+            if (this.deltaV > 0) this.spend(CONFIG.DELTA_V_DRAIN.intercept * dt * 0.5);
+        } else {
+            // Drift on own orbit while AI decides next orbit transfer
+            this.angle = Utils.normalizeAngle(this.angle + this.angularVelocity * dt);
         }
         this._updatePos();
     }
 }
 
-// ─── ASAT Missile ────────────────────────────────────────────────────────────
+// ─── DA-ASAT Missile ──────────────────────────────────────────────────────────
 
 class ASATMissile extends Entity {
     constructor(targetSat) {
         super('asat');
         this.targetId = targetSat.id;
-        // Spawn off-screen in a random direction
-        const spawnAngle = Math.random() * Math.PI * 2;
-        const spawnDist  = CONFIG.EARTH_RADIUS * 5;
-        this.x       = Math.cos(spawnAngle) * spawnDist;
-        this.y       = Math.sin(spawnAngle) * spawnDist;
-        this.speed   = 90;    // px / second — fast missile
-        this.alive   = true;
-        this.warned  = false;
+        const a = Math.random() * Math.PI * 2;
+        this.x    = Math.cos(a) * CONFIG.EARTH_RADIUS * 5;
+        this.y    = Math.sin(a) * CONFIG.EARTH_RADIUS * 5;
+        this.speed = 95;
+        this.alive = true;
     }
-
     update(dt, targetSat) {
-        if (!this.alive || !targetSat || !targetSat.alive) {
-            this.alive = false;
-            return;
-        }
-        const dx = targetSat.x - this.x;
-        const dy = targetSat.y - this.y;
-        const d  = Math.sqrt(dx * dx + dy * dy);
-        if (d < 1) { this.alive = false; return; }
-        this.x += (dx / d) * this.speed * dt;
-        this.y += (dy / d) * this.speed * dt;
+        if (!this.alive || !targetSat || !targetSat.alive) { this.alive = false; return; }
+        const dx = targetSat.x - this.x, dy = targetSat.y - this.y;
+        const d  = Math.sqrt(dx * dx + dy * dy) || 1;
+        this.x += dx / d * this.speed * dt;
+        this.y += dy / d * this.speed * dt;
     }
 }
 
-// ─── Launch Rocket ───────────────────────────────────────────────────────────
+// ─── Launch Rocket ────────────────────────────────────────────────────────────
 
 class LaunchRocket extends Entity {
-    /**
-     * @param {GroundStation} station
-     * @param {Satellite}     payload  — satellite to deploy (not yet in main list)
-     */
     constructor(station, payload) {
         super('rocket');
-        this.stationId  = station.id;
-        this.x          = station.x;
-        this.y          = station.y;
-        this.payload    = payload;
-        this.progress   = 0;           // 0 → 1 (launch to deploy)
-        this.alive      = true;
-        // Flight duration: proportional to orbit altitude
-        this.duration   = 4 + payload.orbit.radius / 40;
-        this.elapsed    = 0;
-        // Start and end positions
-        this.startX     = station.x;
-        this.startY     = station.y;
+        this.stationId = station.id;
+        this.payload   = payload;
+        this.x = this.startX = station.x;
+        this.y = this.startY = station.y;
+        this.progress  = 0;
+        this.alive     = true;
+        this.duration  = 3 + payload.orbit.radius / 50;
+        this.elapsed   = 0;
     }
-
     update(dt) {
         if (!this.alive) return;
-        this.elapsed  += dt;
-        this.progress  = Math.min(1, this.elapsed / this.duration);
-        // Interpolate toward target orbit position
-        const target = Utils.orbitPos(this.payload.orbit.radius, this.payload.angle);
-        this.x = Utils.lerp(this.startX, target.x, this.progress);
-        this.y = Utils.lerp(this.startY, target.y, this.progress);
+        this.elapsed += dt;
+        this.progress = Math.min(1, this.elapsed / this.duration);
+        const t = Utils.orbitPos(this.payload.orbit.radius, this.payload.angle);
+        this.x = Utils.lerp(this.startX, t.x, this.progress);
+        this.y = Utils.lerp(this.startY, t.y, this.progress);
         if (this.progress >= 1) this.alive = false;
     }
 }
 
-// ─── Debris Cloud ────────────────────────────────────────────────────────────
+// ─── Debris Cloud ─────────────────────────────────────────────────────────────
 
 class DebrisCloud extends Entity {
     constructor(orbit, angle) {
         super('debris');
         this.orbit   = orbit;
         this.angle   = Utils.normalizeAngle(angle);
-        this.spread  = CONFIG.DEBRIS_INITIAL_SPREAD;   // radians half-width
+        this.spread  = CONFIG.DEBRIS_INITIAL_SPREAD;
         this.density = 1.0;
         this.alive   = true;
         this.angularVelocity = Utils.angularVelocity(orbit.period);
         this._updatePos();
     }
-
     _updatePos() {
-        const p = Utils.orbitPos(this.orbit.radius, this.angle);
-        this.x = p.x;
-        this.y = p.y;
+        this.x = Math.cos(this.angle) * this.orbit.radius;
+        this.y = Math.sin(this.angle) * this.orbit.radius;
     }
-
     update(dt) {
         if (!this.alive) return;
-        this.angle = Utils.normalizeAngle(this.angle + this.angularVelocity * dt);
-        // Spread widens slightly over time (cloud disperses)
-        this.spread  += 0.002 * dt;
+        this.angle   = Utils.normalizeAngle(this.angle + this.angularVelocity * dt);
+        this.spread  = Math.min(Math.PI * 0.8, this.spread + 0.002 * dt);
         this.density -= this.orbit.debrisDecay * dt;
         if (this.density <= 0) { this.density = 0; this.alive = false; }
         this._updatePos();
     }
-
-    /** Returns true if satellite at given angle on same orbit is inside this cloud */
-    hits(satellite) {
-        if (satellite.orbit.key !== this.orbit.key) return false;
-        const d = Math.abs(Utils.angleDiff(this.angle, satellite.angle));
-        return d < this.spread;
+    hits(sat) {
+        if (sat.orbit.key !== this.orbit.key) return false;
+        return Math.abs(Utils.angleDiff(this.angle, sat.angle)) < this.spread;
     }
 }
