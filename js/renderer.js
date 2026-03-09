@@ -17,18 +17,23 @@ const Renderer = {
 
         ctx.save();
         ctx.translate(cx, cy);
+        ctx.scale(game.zoom, game.zoom);
+
+        // Sun illumination layer (behind everything)
+        this._drawSunLight(game);
 
         if (game.showCoverage) this._drawCoverageOverlay(game);
 
         this._drawOrbits(game);
-        this._drawEarth();
-        this._drawGroundStations(game.groundStations);
+        this._drawEarth(game);
+        this._drawGroundStations(game.groundStations, game);
+        this._drawJammers(game);
         this._drawDebris(game.debris);
         this._drawRockets(game.rockets);
 
         if (game.showThreats) this._drawThreatArrows(game);
 
-        this._drawSatellites(game.satellites, game.selectedSat);
+        this._drawSatellites(game.satellites, game.selectedSat, game);
         this._drawASATs(game.asats);
         this._drawSelectionRing(game.selectedSat);
 
@@ -67,13 +72,50 @@ const Renderer = {
         }
     },
 
+    // ── Sun Illumination ─────────────────────────────────────────────────────
+
+    _drawSunLight(game) {
+        const ctx = this.ctx;
+        const sunX = Math.cos(game.sunAngle) * 500;
+        const sunY = Math.sin(game.sunAngle) * 500;
+
+        // Draw sun glow
+        const grd = ctx.createRadialGradient(sunX, sunY, 5, sunX, sunY, 80);
+        grd.addColorStop(0, 'rgba(255,255,200,0.3)');
+        grd.addColorStop(0.5, 'rgba(255,220,100,0.08)');
+        grd.addColorStop(1, 'rgba(255,200,50,0)');
+        ctx.beginPath();
+        ctx.arc(sunX, sunY, 80, 0, Math.PI * 2);
+        ctx.fillStyle = grd;
+        ctx.fill();
+
+        // Sun symbol
+        ctx.beginPath();
+        ctx.arc(sunX, sunY, 6, 0, Math.PI * 2);
+        ctx.fillStyle = '#ffee88';
+        ctx.fill();
+        ctx.fillStyle = 'rgba(255,255,200,0.6)';
+        ctx.font = '8px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('☀', sunX, sunY - 12);
+
+        // Subtle illumination gradient over the play area
+        const illGrd = ctx.createLinearGradient(
+            sunX * 0.5, sunY * 0.5,
+            -sunX * 0.5, -sunY * 0.5
+        );
+        illGrd.addColorStop(0, 'rgba(255,255,200,0.03)');
+        illGrd.addColorStop(1, 'rgba(0,0,30,0.05)');
+        ctx.fillStyle = illGrd;
+        ctx.fillRect(-500, -500, 1000, 1000);
+    },
+
     // ── Coverage Overlay ─────────────────────────────────────────────────────
 
     _drawCoverageOverlay(game) {
         const ctx   = this.ctx;
         const alpha = CONFIG.COVERAGE_OVERLAY_ALPHA;
 
-        // Ground station coverage cones
         for (const gs of game.groundStations) {
             ctx.beginPath();
             ctx.moveTo(0, 0);
@@ -85,7 +127,6 @@ const Renderer = {
             ctx.fill();
         }
 
-        // Relay coverage circles
         const relays = game.satellites.filter(s => s.type === 'relay' && s.alive && s.inComms);
         for (const r of relays) {
             ctx.beginPath();
@@ -100,7 +141,6 @@ const Renderer = {
     _drawOrbits(game) {
         const ctx      = this.ctx;
         const orbKeys  = Object.keys(CONFIG.ORBITS);
-        // Spread label angles around the circle so they never pile up
         const labelAngles = [-0.25, -0.60, -0.95, -1.30, -1.65, -2.00, -2.35, -2.70];
 
         orbKeys.forEach((key, idx) => {
@@ -108,6 +148,26 @@ const Renderer = {
             const selected  = game.selectedSat;
             const highlight = selected && selected.orbit.key === key;
 
+            // Draw sub-level bands (faint)
+            for (let sl = 1; sl <= CONFIG.SUB_LEVELS; sl++) {
+                const offset = (sl - 3) * CONFIG.SUB_LEVEL_SPACING;
+                const r = orb.radius + offset;
+                ctx.beginPath();
+                ctx.arc(0, 0, r, 0, Math.PI * 2);
+                if (highlight && selected.subLevel === sl) {
+                    ctx.strokeStyle = orb.color;
+                    ctx.lineWidth = 1.2;
+                    ctx.setLineDash([]);
+                } else {
+                    ctx.strokeStyle = this._alpha(orb.color, highlight ? 0.15 : 0.06);
+                    ctx.lineWidth = 0.3;
+                    ctx.setLineDash([2, 8]);
+                }
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+
+            // Main orbit ring
             ctx.beginPath();
             ctx.arc(0, 0, orb.radius, 0, Math.PI * 2);
             ctx.strokeStyle = highlight
@@ -131,9 +191,9 @@ const Renderer = {
         });
     },
 
-    // ── Earth ─────────────────────────────────────────────────────────────────
+    // ── Earth (more realistic) ───────────────────────────────────────────────
 
-    _drawEarth() {
+    _drawEarth(game) {
         const ctx = this.ctx;
         const r   = CONFIG.EARTH_RADIUS;
 
@@ -146,23 +206,111 @@ const Renderer = {
         ctx.fillStyle = grd;
         ctx.fill();
 
-        // Ocean body
-        const ocean = ctx.createRadialGradient(-r * 0.3, -r * 0.3, 0, 0, 0, r);
-        ocean.addColorStop(0, '#3a8cdc');
-        ocean.addColorStop(1, '#163f6e');
+        // Ocean body with day/night shading
+        ctx.save();
         ctx.beginPath();
         ctx.arc(0, 0, r, 0, Math.PI * 2);
-        ctx.fillStyle = ocean;
-        ctx.fill();
+        ctx.clip();
 
-        // Landmasses
+        // Ocean gradient
+        const ocean = ctx.createRadialGradient(-r * 0.3, -r * 0.3, 0, 0, 0, r);
+        ocean.addColorStop(0, '#2a7cc8');
+        ocean.addColorStop(0.5, '#1a5c98');
+        ocean.addColorStop(1, '#0e3460');
+        ctx.fillStyle = ocean;
+        ctx.fillRect(-r, -r, r * 2, r * 2);
+
+        // Continents (more realistic shapes)
         ctx.fillStyle = '#2a7a3a';
-        this._ellipse(ctx, -30, -10, 18, 28);   // Americas
-        this._ellipse(ctx,  14,  -4, 13, 30);   // Africa/Europe
-        this._ellipse(ctx,  46, -18, 26, 20);   // Asia
-        this._ellipse(ctx, -10,  20, 12, 8);    // Australia-ish
-        ctx.fillStyle = '#e0f0ff';
-        this._ellipse(ctx,   0,  62, 30, 12);   // Antarctica
+
+        // North America
+        ctx.beginPath();
+        ctx.moveTo(-48, -38); ctx.lineTo(-35, -45); ctx.lineTo(-22, -40);
+        ctx.lineTo(-18, -30); ctx.lineTo(-25, -20); ctx.lineTo(-30, -10);
+        ctx.lineTo(-38, -5);  ctx.lineTo(-45, -15); ctx.lineTo(-50, -28);
+        ctx.closePath(); ctx.fill();
+
+        // South America
+        ctx.beginPath();
+        ctx.moveTo(-30, -2); ctx.lineTo(-22, -5); ctx.lineTo(-16, 5);
+        ctx.lineTo(-15, 18); ctx.lineTo(-20, 30); ctx.lineTo(-25, 35);
+        ctx.lineTo(-28, 28); ctx.lineTo(-32, 15); ctx.lineTo(-33, 5);
+        ctx.closePath(); ctx.fill();
+
+        // Europe
+        ctx.fillStyle = '#338844';
+        ctx.beginPath();
+        ctx.moveTo(5, -38); ctx.lineTo(15, -42); ctx.lineTo(22, -38);
+        ctx.lineTo(20, -30); ctx.lineTo(12, -28); ctx.lineTo(5, -32);
+        ctx.closePath(); ctx.fill();
+
+        // Africa
+        ctx.fillStyle = '#3a8a3a';
+        ctx.beginPath();
+        ctx.moveTo(8, -24); ctx.lineTo(18, -26); ctx.lineTo(28, -18);
+        ctx.lineTo(30, -5);  ctx.lineTo(25, 10);  ctx.lineTo(18, 18);
+        ctx.lineTo(10, 12);  ctx.lineTo(5, 0);    ctx.lineTo(4, -15);
+        ctx.closePath(); ctx.fill();
+
+        // Asia
+        ctx.fillStyle = '#2e7e35';
+        ctx.beginPath();
+        ctx.moveTo(25, -42); ctx.lineTo(40, -45); ctx.lineTo(55, -38);
+        ctx.lineTo(60, -28); ctx.lineTo(55, -18); ctx.lineTo(45, -14);
+        ctx.lineTo(35, -20); ctx.lineTo(28, -30);
+        ctx.closePath(); ctx.fill();
+
+        // India
+        ctx.fillStyle = '#348838';
+        ctx.beginPath();
+        ctx.moveTo(38, -12); ctx.lineTo(44, -15); ctx.lineTo(46, -5);
+        ctx.lineTo(42, 2);   ctx.lineTo(36, -2);
+        ctx.closePath(); ctx.fill();
+
+        // Southeast Asia / Indonesia
+        ctx.fillStyle = '#2c7630';
+        this._ellipse(ctx, 52, -6, 8, 4);
+        this._ellipse(ctx, 58, 0, 6, 3);
+        this._ellipse(ctx, 55, 5, 5, 2);
+
+        // Australia
+        ctx.fillStyle = '#8a6a30';
+        ctx.beginPath();
+        ctx.moveTo(52, 12); ctx.lineTo(65, 10); ctx.lineTo(68, 18);
+        ctx.lineTo(62, 25); ctx.lineTo(52, 22); ctx.lineTo(48, 16);
+        ctx.closePath(); ctx.fill();
+
+        // Antarctica
+        ctx.fillStyle = '#d8e8f0';
+        ctx.beginPath();
+        ctx.moveTo(-40, 55); ctx.lineTo(-10, 58); ctx.lineTo(20, 56);
+        ctx.lineTo(45, 58);  ctx.lineTo(50, 64);  ctx.lineTo(-45, 64);
+        ctx.closePath(); ctx.fill();
+
+        // Greenland
+        ctx.fillStyle = '#c8dce8';
+        this._ellipse(ctx, -18, -50, 8, 6);
+
+        // Cloud wisps (subtle)
+        ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(-20, -15, 25, -0.5, 0.8); ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(30, 5, 20, 0.3, 1.5); ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(-5, 25, 18, -0.3, 1.0); ctx.stroke();
+
+        // Day/night terminator
+        if (game) {
+            const nightAngle = game.sunAngle + Math.PI;
+            ctx.beginPath();
+            ctx.arc(0, 0, r, nightAngle - Math.PI / 2, nightAngle + Math.PI / 2);
+            ctx.fillStyle = 'rgba(0,0,20,0.35)';
+            ctx.fill();
+        }
+
+        ctx.restore();
 
         // Atmosphere rim
         ctx.beginPath();
@@ -181,7 +329,7 @@ const Renderer = {
 
     // ── Ground Stations ───────────────────────────────────────────────────────
 
-    _drawGroundStations(stations) {
+    _drawGroundStations(stations, game) {
         const ctx = this.ctx;
         for (const gs of stations) {
             const nx = Math.cos(gs.angle), ny = Math.sin(gs.angle);
@@ -198,7 +346,7 @@ const Renderer = {
             // Station dot
             ctx.beginPath();
             ctx.arc(gs.x, gs.y, 5, 0, Math.PI * 2);
-            ctx.fillStyle   = '#44ff88';
+            ctx.fillStyle   = gs.jamActive ? '#ff88ff' : '#44ff88';
             ctx.fill();
             ctx.strokeStyle = '#fff';
             ctx.lineWidth   = 1;
@@ -208,17 +356,51 @@ const Renderer = {
             ctx.beginPath();
             ctx.moveTo(gs.x, gs.y);
             ctx.lineTo(gs.x + nx * 11, gs.y + ny * 11);
-            ctx.strokeStyle = '#44ff88';
+            ctx.strokeStyle = gs.jamActive ? '#ff88ff' : '#44ff88';
             ctx.lineWidth   = 1.5;
             ctx.stroke();
 
-            // Label
+            // Label with slot info
             ctx.fillStyle = '#aaffcc';
             ctx.font      = '8px monospace';
             ctx.textAlign = 'center';
-            ctx.fillText(gs.name, gs.x + nx * 20, gs.y + ny * 20 + 3);
+            const slotInfo = gs.launchSlots > 1 ? ` [${gs.availableSlots}/${gs.launchSlots}]` : '';
+            ctx.fillText(gs.name + slotInfo, gs.x + nx * 20, gs.y + ny * 20 + 3);
+
+            // Jam active indicator
+            if (gs.jamActive) {
+                ctx.beginPath();
+                ctx.arc(gs.x, gs.y, 8, 0, Math.PI * 2);
+                ctx.strokeStyle = 'rgba(255,136,255,0.6)';
+                ctx.lineWidth = 1.5;
+                ctx.setLineDash([3, 3]);
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
         }
         ctx.lineWidth = 1;
+    },
+
+    // ── Jammers ───────────────────────────────────────────────────────────────
+
+    _drawJammers(game) {
+        const ctx = this.ctx;
+        for (const j of game.activeJammers) {
+            const pulse = 0.5 + 0.3 * Math.sin(Date.now() * 0.008);
+            ctx.beginPath();
+            ctx.arc(j.x, j.y, j.radius * pulse, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(255,100,255,${0.15 + pulse * 0.1})`;
+            ctx.lineWidth = 2;
+            ctx.setLineDash([6, 4]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            ctx.beginPath();
+            ctx.arc(j.x, j.y, j.radius, 0, Math.PI * 2);
+            ctx.fillStyle = `rgba(255,100,255,0.03)`;
+            ctx.fill();
+            ctx.lineWidth = 1;
+        }
     },
 
     // ── Debris ────────────────────────────────────────────────────────────────
@@ -229,7 +411,6 @@ const Renderer = {
             if (!d.alive) continue;
             const a = d.density * 0.7;
 
-            // Arc on orbit
             ctx.beginPath();
             ctx.arc(0, 0, d.orbit.radius, d.angle - d.spread, d.angle + d.spread);
             ctx.strokeStyle = `rgba(255,110,0,${a})`;
@@ -237,7 +418,6 @@ const Renderer = {
             ctx.stroke();
             ctx.lineWidth = 1;
 
-            // Particle cloud
             const n = Math.ceil(d.density * 14);
             for (let i = 0; i < n; i++) {
                 const pa = d.angle + Utils.rand(-d.spread, d.spread);
@@ -265,7 +445,6 @@ const Renderer = {
             const d  = Math.sqrt(dx * dx + dy * dy) || 1;
             const ux = dx / d, uy = dy / d;
 
-            // Dashed line
             ctx.beginPath();
             ctx.moveTo(enemy.x + ux * 10, enemy.y + uy * 10);
             ctx.lineTo(target.x - ux * 14, target.y - uy * 14);
@@ -275,7 +454,6 @@ const Renderer = {
             ctx.stroke();
             ctx.setLineDash([]);
 
-            // Arrowhead
             const ex = target.x - ux * 14, ey = target.y - uy * 14;
             const ax = -uy * 5, ay = ux * 5;
             ctx.beginPath();
@@ -311,34 +489,49 @@ const Renderer = {
 
     // ── Satellites ────────────────────────────────────────────────────────────
 
-    _drawSatellites(satellites, selectedSat) {
+    _drawSatellites(satellites, selectedSat, game) {
         for (const sat of satellites) {
             if (!sat.alive) continue;
-            this._drawSat(sat, sat === selectedSat);
+            this._drawSat(sat, sat === selectedSat, game);
         }
     },
 
-    _drawSat(sat, selected) {
+    _drawSat(sat, selected, game) {
         const ctx = this.ctx;
 
-        // Shape / colour by type
         const STYLES = {
-            utility:   { color: '#44ccff', shape: 'square',   size: 6 },
-            rpo:       { color: '#44ff88', shape: 'diamond',  size: 6 },
-            relay:     { color: '#ffdd44', shape: 'hexagon',  size: 7 },
-            enemy_rpo: { color: '#ff4444', shape: 'triangle', size: 6 },
+            utility:     { color: '#44ccff', shape: 'square',   size: 6 },
+            rpo:         { color: '#44ff88', shape: 'diamond',  size: 6 },
+            relay:       { color: '#ffdd44', shape: 'hexagon',  size: 7 },
+            maintenance: { color: '#88ffdd', shape: 'pentagon', size: 7 },
+            enemy_rpo:   { color: '#ff4444', shape: 'triangle', size: 6 },
         };
         const st = STYLES[sat.type] || { color: '#aaaaaa', shape: 'circle', size: 5 };
 
         let color = st.color;
-        // Dim if out of comms (player only)
         if (sat.faction === 'player' && !sat.inComms) color = this._alpha(st.color, 0.4);
-        // Damage flicker
+        if (sat.noPower) color = this._alpha('#666666', 0.5);
         const flickerOk = sat.health >= 50 || (Math.sin(Date.now() * 0.015) > 0);
 
         ctx.save();
         ctx.translate(sat.x, sat.y);
         ctx.globalAlpha = flickerOk ? 1 : 0.45;
+
+        // Transfer arc visualization
+        if (sat.transferring && sat.transferFromOrbit && sat.transferTarget) {
+            ctx.beginPath();
+            ctx.arc(
+                -sat.x, -sat.y,
+                Utils.lerp(sat.transferFromOrbit.radius, sat.transferTarget.radius, sat.transferProgress),
+                sat.angle - 0.3, sat.angle + 0.3
+            );
+            ctx.strokeStyle = 'rgba(255,220,100,0.4)';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([3, 3]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.lineWidth = 1;
+        }
 
         // Selection glow
         if (selected) {
@@ -369,6 +562,18 @@ const Renderer = {
             ctx.stroke();
         }
 
+        // Refueling indicator
+        if (sat.refueling) {
+            const pulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.01);
+            ctx.beginPath();
+            ctx.arc(0, 0, st.size + 4, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(136,255,221,${0.3 + pulse * 0.5})`;
+            ctx.lineWidth = 2;
+            ctx.setLineDash([2, 2]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
         // Escort link dots
         if (sat.escortedById) {
             ctx.beginPath();
@@ -386,8 +591,21 @@ const Renderer = {
             ctx.fillRect(-bw / 2, st.size + 3, bw * (sat.health / 100), bh);
         }
 
-        // Delta-V bar (always shown, colour-coded by warning level)
+        // Delta-V bar
         this._drawDVBar(ctx, sat, st.size);
+
+        // Power indicator (small battery icon)
+        if (sat.faction === 'player') {
+            this._drawPowerBar(ctx, sat, st.size);
+        }
+
+        // Sunlight indicator
+        if (sat.faction === 'player' && !sat.inSunlight) {
+            ctx.fillStyle = 'rgba(50,50,100,0.6)';
+            ctx.font = '6px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText('●', -st.size - 3, -st.size - 1);
+        }
 
         // Out-of-comms indicator
         if (sat.faction === 'player' && !sat.inComms) {
@@ -397,11 +615,20 @@ const Renderer = {
             ctx.fill();
         }
 
+        // No-power indicator
+        if (sat.noPower) {
+            ctx.fillStyle = '#ff4444';
+            ctx.font = '7px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText('⚡', st.size + 5, 0);
+        }
+
         // Label above
         ctx.fillStyle = 'rgba(255,255,255,0.85)';
         ctx.font      = '7px monospace';
         ctx.textAlign = 'center';
-        ctx.fillText(`${sat.type.slice(0,3).toUpperCase()}-${sat.id}`, 0, -st.size - 4);
+        const prefix = sat.type === 'maintenance' ? 'MNT' : sat.type.slice(0,3).toUpperCase();
+        ctx.fillText(`${prefix}-${sat.id}`, 0, -st.size - 4);
 
         ctx.restore();
     },
@@ -421,6 +648,19 @@ const Renderer = {
         ctx.fillRect(-bw / 2, by, bw * pct, bh);
     },
 
+    _drawPowerBar(ctx, sat, size) {
+        const bw = 14, bh = 1.5;
+        const by = size + 10;
+        const pct = sat.batteryPct;
+        const barColor = pct < CONFIG.NO_POWER_THRESHOLD ? '#ff2222'
+                       : pct < CONFIG.LOW_POWER_THRESHOLD ? '#ffaa00'
+                       : '#ffee44';
+        ctx.fillStyle = 'rgba(0,0,0,0.4)';
+        ctx.fillRect(-bw / 2, by, bw, bh);
+        ctx.fillStyle = barColor;
+        ctx.fillRect(-bw / 2, by, bw * pct, bh);
+    },
+
     _shape(ctx, shape, size) {
         ctx.beginPath();
         switch (shape) {
@@ -433,6 +673,13 @@ const Renderer = {
             case 'hexagon':
                 for (let i = 0; i < 6; i++) {
                     const a = (i / 6) * Math.PI * 2 - Math.PI / 6;
+                    i === 0 ? ctx.moveTo(Math.cos(a) * size, Math.sin(a) * size)
+                            : ctx.lineTo(Math.cos(a) * size, Math.sin(a) * size);
+                }
+                ctx.closePath(); break;
+            case 'pentagon':
+                for (let i = 0; i < 5; i++) {
+                    const a = (i / 5) * Math.PI * 2 - Math.PI / 2;
                     i === 0 ? ctx.moveTo(Math.cos(a) * size, Math.sin(a) * size)
                             : ctx.lineTo(Math.cos(a) * size, Math.sin(a) * size);
                 }
@@ -456,7 +703,6 @@ const Renderer = {
             ctx.save();
             ctx.translate(m.x, m.y);
 
-            // Flare
             ctx.beginPath();
             ctx.arc(0, 0, 5, 0, Math.PI * 2);
             ctx.fillStyle = 'rgba(255,60,0,0.85)';
@@ -466,7 +712,6 @@ const Renderer = {
             ctx.fillStyle = '#fff';
             ctx.fill();
 
-            // Label
             ctx.fillStyle = '#ff4444';
             ctx.font      = '7px monospace';
             ctx.textAlign = 'center';
@@ -493,7 +738,6 @@ const Renderer = {
             ctx.lineWidth   = 0.8;
             ctx.stroke();
 
-            // Exhaust trail
             const dx = r.x - r.startX, dy = r.y - r.startY;
             const len = Math.sqrt(dx * dx + dy * dy);
             if (len > 2) {
@@ -574,11 +818,11 @@ const Renderer = {
         ctx.fillStyle = '#aaffcc';
         ctx.fillText(`GS: ${game.groundStations.length}/${CONFIG.GROUND_STATION_UNLOCKS.length}`, COL[5], 23);
 
-        // Overlay toggle hints
+        // Zoom indicator
         ctx.fillStyle  = '#446688';
         ctx.font       = '9px monospace';
         ctx.textAlign  = 'right';
-        ctx.fillText(`[C] coverage  [T] threats  [Space] pause`, W - 10, 14);
+        ctx.fillText(`ZOOM: ${(game.zoom * 100).toFixed(0)}%  [C] coverage  [T] threats  [Space] pause  [+/-] zoom`, W - 10, 14);
 
         // Scenario objective progress bar
         const sc = game.scenario;
