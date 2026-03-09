@@ -697,7 +697,7 @@ class Game {
             sat.status = 'nominal';
             sat.mode   = sat.type === 'maintenance' ? 'standby' : 'patrol';
             sat.refueling = false;
-            this.addMessage(`SAT-${sat.id} returned to standby.`, '#88ccff');
+            this.addMessage(`${sat.type.toUpperCase()}-${sat.id} returned to standby.`, '#88ccff');
             return true;
         }
 
