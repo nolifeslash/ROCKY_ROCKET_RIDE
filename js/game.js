@@ -25,6 +25,15 @@ class Game {
         this.showCoverage   = false;
         this.showThreats    = true;
 
+        // Zoom
+        this.zoom           = CONFIG.ZOOM_DEFAULT;
+
+        // Sun angle (radians, rotates over time)
+        this.sunAngle       = 0;
+
+        // Active jammers [{stationId, timer, radius}]
+        this.activeJammers  = [];
+
         // Timers (set by loadScenario)
         this._moneyTimer          = 0;
         this._enemySpawnTimer     = 0;
@@ -44,6 +53,16 @@ class Game {
         if (this.paused || this.gameOver) return;
         this.time += dt;
 
+        // ── Sun cycle ───────────────────────────────────────────────────────
+        this.sunAngle = Utils.normalizeAngle((this.time / CONFIG.SUN_CYCLE_PERIOD) * Math.PI * 2);
+
+        // ── Ground station updates (jam timers, slot cooldowns) ─────────────
+        for (const gs of this.groundStations) gs.update(dt);
+
+        // ── Active jammer expiry ────────────────────────────────────────────
+        for (const j of this.activeJammers) j.timer -= dt;
+        this.activeJammers = this.activeJammers.filter(j => j.timer > 0);
+
         // ── Advance satellites ──────────────────────────────────────────────
         const enemySats = this.satellites.filter(s => s.type === 'enemy_rpo' && s.alive);
         const satMap    = {};
@@ -53,6 +72,7 @@ class Game {
             if (!sat.alive) continue;
             if (sat.type !== 'enemy_rpo') sat.update(dt);
             if (sat.type === 'rpo' && sat.faction === 'player') this._updateFriendlyRPO(sat, dt);
+            if (sat.type === 'maintenance' && sat.faction === 'player') this._updateMaintenance(sat, dt);
             if (sat.type === 'utility') this._updateUtilityService(sat, dt);
         }
 
@@ -62,8 +82,11 @@ class Game {
         for (const r of this.rockets) r.update(dt);
         for (const d of this.debris)  d.update(dt);
 
-        // ── Comms ───────────────────────────────────────────────────────────
-        Comms.update(this.groundStations, this.satellites);
+        // ── Sun / Power ─────────────────────────────────────────────────────
+        this._updatePower(dt);
+
+        // ── Comms (with jamming) ────────────────────────────────────────────
+        Comms.update(this.groundStations, this.satellites, this.activeJammers);
 
         // ── Collision & damage ──────────────────────────────────────────────
         this._checkCollisions();
@@ -88,6 +111,7 @@ class Game {
 
         // ── Ground station unlocks ──────────────────────────────────────────
         this._checkGSUnlocks();
+        this._checkLaunchSlotUpgrades();
 
         // ── Expire messages ─────────────────────────────────────────────────
         this.messages = this.messages.filter(m => m.expires > this.time);
@@ -107,9 +131,10 @@ class Game {
     _updateUtilityService(sat, dt) {
         let target = 1.0;
         if (sat.safeMode)      target = 0.8;
-        if (sat.task)          target = 0.6;   // maneuvering cuts output
+        if (sat.task)          target = 0.6;
         if (sat.health < 50)   target = Math.max(0.1, sat.health / 100);
-        // Smooth transition
+        if (sat.lowPower)      target *= 0.5;
+        if (sat.noPower)       target = 0;
         sat.serviceValue += (target - sat.serviceValue) * Math.min(1, dt * 2);
     }
 
@@ -121,7 +146,6 @@ class Game {
         const { type, targetId } = rpo.task;
         const drainRate = CONFIG.DELTA_V_DRAIN[type] || 0;
 
-        // Drain delta-v while maneuvering
         if (drainRate > 0) {
             if (rpo.deltaV <= 0) {
                 rpo.task   = null;
@@ -136,19 +160,19 @@ class Game {
             const target = this.satellites.find(s => s.id === targetId && s.alive);
             if (!target) { rpo.task = null; return; }
 
-            // Transfer to target's orbit if needed
-            if (rpo.orbit.key !== target.orbit.key) {
-                rpo.orbit = target.orbit;
-                rpo.angularVelocity = Utils.angularVelocity(rpo.orbit.period);
+            if (rpo.orbit.key !== target.orbit.key && !rpo.transferring) {
+                this._startHohmannTransfer(rpo, target.orbit);
             }
-            const diff = Utils.angleDiff(rpo.angle, target.angle);
-            rpo.angle = Utils.normalizeAngle(
-                rpo.angle + Math.sign(diff) * CONFIG.FRIENDLY_MANEUVER_SPEED * rpo.thrustMult * dt
-            );
-            rpo._updatePos();
+            if (!rpo.transferring && rpo.orbit.key === target.orbit.key) {
+                const diff = Utils.angleDiff(rpo.angle, target.angle);
+                rpo.angle = Utils.normalizeAngle(
+                    rpo.angle + Math.sign(diff) * CONFIG.FRIENDLY_MANEUVER_SPEED * rpo.thrustMult * dt
+                );
+                rpo._updatePos();
+            }
             rpo.status = 'maneuvering';
 
-            if (Utils.dist(rpo.x, rpo.y, target.x, target.y) < CONFIG.INTERCEPT_CLOSE_RADIUS) {
+            if (!rpo.transferring && Utils.dist(rpo.x, rpo.y, target.x, target.y) < CONFIG.INTERCEPT_CLOSE_RADIUS) {
                 this.addMessage(`✓ RPO-${rpo.id} neutralised enemy satellite!`, '#ffdd44');
                 this.score += 150;
                 target.alive = false;
@@ -160,36 +184,156 @@ class Game {
             const escortee = this.satellites.find(s => s.id === targetId && s.alive);
             if (!escortee) { rpo.task = null; return; }
 
-            if (rpo.orbit.key !== escortee.orbit.key) {
-                rpo.orbit = escortee.orbit;
-                rpo.angularVelocity = Utils.angularVelocity(rpo.orbit.period);
+            if (rpo.orbit.key !== escortee.orbit.key && !rpo.transferring) {
+                this._startHohmannTransfer(rpo, escortee.orbit);
             }
             escortee.escortedById = rpo.id;
 
-            // Trail 15° behind escortee
-            const desired = Utils.normalizeAngle(escortee.angle - 0.26);
-            const diff    = Utils.angleDiff(rpo.angle, desired);
-            rpo.angle = Utils.normalizeAngle(
-                rpo.angle + Math.sign(diff) * CONFIG.FRIENDLY_MANEUVER_SPEED * rpo.thrustMult * dt * 0.6
-            );
-            rpo._updatePos();
+            if (!rpo.transferring && rpo.orbit.key === escortee.orbit.key) {
+                const desired = Utils.normalizeAngle(escortee.angle - 0.26);
+                const diff    = Utils.angleDiff(rpo.angle, desired);
+                rpo.angle = Utils.normalizeAngle(
+                    rpo.angle + Math.sign(diff) * CONFIG.FRIENDLY_MANEUVER_SPEED * rpo.thrustMult * dt * 0.6
+                );
+                rpo._updatePos();
+            }
             rpo.status = 'maneuvering';
 
         } else if (type === 'body_block') {
-            // Position between enemy and escortee
             const target = this.satellites.find(s => s.id === targetId && s.alive);
             if (!target) { rpo.task = null; return; }
-            if (rpo.orbit.key !== target.orbit.key) {
-                rpo.orbit = target.orbit;
-                rpo.angularVelocity = Utils.angularVelocity(rpo.orbit.period);
+            if (rpo.orbit.key !== target.orbit.key && !rpo.transferring) {
+                this._startHohmannTransfer(rpo, target.orbit);
             }
-            const diff = Utils.angleDiff(rpo.angle, target.angle);
-            rpo.angle = Utils.normalizeAngle(
-                rpo.angle + Math.sign(diff) * CONFIG.FRIENDLY_MANEUVER_SPEED * rpo.thrustMult * dt * 1.2
-            );
-            rpo._updatePos();
+            if (!rpo.transferring && rpo.orbit.key === target.orbit.key) {
+                const diff = Utils.angleDiff(rpo.angle, target.angle);
+                rpo.angle = Utils.normalizeAngle(
+                    rpo.angle + Math.sign(diff) * CONFIG.FRIENDLY_MANEUVER_SPEED * rpo.thrustMult * dt * 1.2
+                );
+                rpo._updatePos();
+            }
             rpo.status = 'maneuvering';
         }
+    }
+
+    // ── Maintenance Satellite Behaviour ──────────────────────────────────────
+
+    _updateMaintenance(msat, dt) {
+        if (!msat.task) { msat.status = 'nominal'; msat.refueling = false; return; }
+
+        const { type, targetId } = msat.task;
+
+        if (type === 'refuel') {
+            const target = this.satellites.find(s => s.id === targetId && s.alive);
+            if (!target) { msat.task = null; msat.refueling = false; return; }
+
+            // Navigate to target's orbit
+            if (msat.orbit.key !== target.orbit.key && !msat.transferring) {
+                this._startHohmannTransfer(msat, target.orbit);
+            }
+
+            if (!msat.transferring && msat.orbit.key === target.orbit.key) {
+                const dist = Utils.dist(msat.x, msat.y, target.x, target.y);
+                if (dist > CONFIG.REFUEL_RANGE) {
+                    // Approach target
+                    const diff = Utils.angleDiff(msat.angle, target.angle);
+                    msat.angle = Utils.normalizeAngle(
+                        msat.angle + Math.sign(diff) * CONFIG.FRIENDLY_MANEUVER_SPEED * msat.thrustMult * dt * 0.8
+                    );
+                    msat._updatePos();
+                    msat.status = 'maneuvering';
+                    msat.refueling = false;
+                } else {
+                    // In range — refuel
+                    msat.refueling = true;
+                    msat.refuelTimer += dt;
+                    msat.status = 'refueling';
+                    // Drain from maintenance sat
+                    const drain = CONFIG.DELTA_V_DRAIN.refueling * dt;
+                    msat.spend(drain);
+
+                    if (msat.refuelTimer >= CONFIG.REFUEL_DURATION) {
+                        const amount = Math.min(CONFIG.REFUEL_AMOUNT, target.deltaVCapacity - target.deltaV);
+                        target.deltaV    = Math.min(target.deltaVCapacity, target.deltaV + amount);
+                        target.fuelUnits = target.deltaV;
+                        this.addMessage(`🔧 MAINT-${msat.id} refueled SAT-${target.id} (+${Math.floor(amount)} ΔV)`, '#88ffdd');
+                        msat.refuelTimer = 0;
+                        msat.task = null;
+                        msat.refueling = false;
+                        msat.status = 'nominal';
+                    }
+                }
+            }
+        } else if (type === 'defend') {
+            const target = this.satellites.find(s => s.id === targetId && s.alive);
+            if (!target) { msat.task = null; return; }
+
+            if (msat.orbit.key !== target.orbit.key && !msat.transferring) {
+                this._startHohmannTransfer(msat, target.orbit);
+            }
+            if (!msat.transferring && msat.orbit.key === target.orbit.key) {
+                const desired = Utils.normalizeAngle(target.angle + 0.15);
+                const diff    = Utils.angleDiff(msat.angle, desired);
+                msat.angle = Utils.normalizeAngle(
+                    msat.angle + Math.sign(diff) * CONFIG.FRIENDLY_MANEUVER_SPEED * msat.thrustMult * dt * 0.5
+                );
+                msat._updatePos();
+            }
+            msat.status = 'defending';
+
+            // Drain
+            const drain = CONFIG.DELTA_V_DRAIN.escort * dt;
+            if (msat.deltaV <= 0) {
+                msat.task = null; msat.status = 'nominal';
+                this.addMessage(`MAINT-${msat.id} ran out of ΔV!`, '#ff6600');
+                return;
+            }
+            msat.spend(drain);
+        }
+    }
+
+    // ── Sun / Power System ──────────────────────────────────────────────────
+
+    _updatePower(dt) {
+        for (const sat of this.satellites) {
+            if (!sat.alive || sat.faction !== 'player') continue;
+
+            // Determine sunlight: satellite is in sunlight if its angle
+            // relative to the sun is within ±90 degrees (front hemisphere)
+            const angleDiff = Math.abs(Utils.angleDiff(sat.angle, this.sunAngle));
+            sat.inSunlight = angleDiff < Math.PI / 2;
+
+            if (sat.inSunlight) {
+                // Charge battery
+                sat.battery = Math.min(sat.batteryCapacity,
+                    sat.battery + CONFIG.SOLAR_PANEL_OUTPUT * dt);
+            } else {
+                // Drain battery
+                sat.battery = Math.max(0,
+                    sat.battery - sat.powerDraw * CONFIG.ECLIPSE_POWER_DRAIN * dt);
+            }
+
+            sat.lowPower = sat.batteryPct < CONFIG.LOW_POWER_THRESHOLD;
+            sat.noPower  = sat.batteryPct < CONFIG.NO_POWER_THRESHOLD;
+        }
+    }
+
+    // ── Hohmann Transfer ────────────────────────────────────────────────────
+
+    _startHohmannTransfer(sat, targetOrbit) {
+        if (sat.transferring) return false;
+        const costs = CONFIG.HOHMANN_COSTS[sat.orbit.key];
+        if (!costs || costs[targetOrbit.key] === undefined) return false;
+        const cost = costs[targetOrbit.key];
+        if (!sat.canAfford(cost)) return false;
+
+        sat.spend(cost);
+        sat.transferring     = true;
+        sat.transferFromOrbit = sat.orbit;
+        sat.transferTarget   = targetOrbit;
+        sat.transferProgress = 0;
+        sat.transferDuration = CONFIG.HOHMANN_TRANSFER_TIME;
+        return true;
     }
 
     // ── Economy ──────────────────────────────────────────────────────────────
@@ -215,7 +359,7 @@ class Game {
         this.money       += net;
         this.totalEarned += Math.max(0, income);
         this.score       += Math.floor(Math.max(0, net) / 5);
-        this.lastNetIncome = net / CONFIG.MONEY_INTERVAL;  // per-second rate for display
+        this.lastNetIncome = net / CONFIG.MONEY_INTERVAL;
     }
 
     // ── Collision Detection ──────────────────────────────────────────────────
@@ -246,7 +390,6 @@ class Game {
         a.alive = false;
         b.alive = false;
 
-        // Auto-pause on collision
         if (!this.paused) {
             this.paused = true;
             this.addMessage('⏸ Auto-paused — press Space to resume.', '#ffdd44');
@@ -274,7 +417,6 @@ class Game {
                     }
                     if (sat.health <= 0) {
                         sat.alive = false;
-                        // Cascade: destroyed sat adds more debris
                         this.debris.push(new DebrisCloud(sat.orbit, sat.angle));
                         if (sat.faction === 'player') {
                             this.addMessage(`💀 ${sat.type.toUpperCase()}-${sat.id} destroyed by debris cascade!`, '#ff4444');
@@ -380,9 +522,26 @@ class Game {
             this.totalEarned >= unlocks[this._gsUnlockIndex].threshold
         ) {
             const cfg = CONFIG.GROUND_STATION_UNLOCKS[this._gsUnlockIndex];
-            this.groundStations.push(new GroundStation(cfg.name, cfg.longitude));
+            this.groundStations.push(new GroundStation(cfg.name, cfg.longitude, cfg.launchSlots));
             this.addMessage(`📡 Ground station unlocked: ${cfg.name}`, '#aaffaa');
             this._gsUnlockIndex++;
+        }
+    }
+
+    // ── Launch Slot Upgrades ─────────────────────────────────────────────────
+
+    _checkLaunchSlotUpgrades() {
+        const thresholds = CONFIG.LAUNCH_SLOT_THRESHOLDS;
+        for (const gs of this.groundStations) {
+            let slots = 1;
+            for (const t of thresholds) {
+                if (this.totalEarned >= t) slots++;
+            }
+            if (slots > gs.maxLaunchSlots) {
+                gs.launchSlots = slots;
+                gs.maxLaunchSlots = slots;
+                this.addMessage(`🚀 ${gs.name}: launch slot upgraded (${slots} slots)`, '#88ffdd');
+            }
         }
     }
 
@@ -391,7 +550,6 @@ class Game {
     _checkEndConditions() {
         const util = this.satellites.filter(s => s.type === 'utility' && s.alive);
 
-        // Loss checks
         if (util.length === 0) {
             this.gameOver       = true;
             this.gameOverReason = 'All utility satellites lost!';
@@ -403,7 +561,6 @@ class Game {
             return;
         }
 
-        // Win checks (scenario objectives)
         if (!this.scenario) return;
         for (const obj of this.scenario.objectives) {
             if (obj.type === 'time_with_sats') {
@@ -450,6 +607,56 @@ class Game {
             return true;
         }
 
+        if (type === 'raise_orbit') {
+            if (sat.subLevel >= CONFIG.SUB_LEVELS) {
+                this.addMessage('Already at highest sub-level.', '#ffaa44');
+                return false;
+            }
+            sat.spend(cost);
+            sat.subLevel = Math.min(CONFIG.SUB_LEVELS, sat.subLevel + 1);
+            sat._updatePos();
+            this.addMessage(`SAT-${sat.id} raised to sub-level ${sat.subLevel}. (ΔV −${cost})`, '#44aaff');
+            return true;
+        }
+
+        if (type === 'lower_orbit') {
+            if (sat.subLevel <= 1) {
+                this.addMessage('Already at lowest sub-level.', '#ffaa44');
+                return false;
+            }
+            sat.spend(cost);
+            sat.subLevel = Math.max(1, sat.subLevel - 1);
+            sat._updatePos();
+            this.addMessage(`SAT-${sat.id} lowered to sub-level ${sat.subLevel}. (ΔV −${cost})`, '#44aaff');
+            return true;
+        }
+
+        if (type === 'hohmann_transfer') {
+            const targetOrbit = CONFIG.ORBITS[targetId];
+            if (!targetOrbit) {
+                this.addMessage('Invalid orbit target.', '#ff4444');
+                return false;
+            }
+            const costs = CONFIG.HOHMANN_COSTS[sat.orbit.key];
+            if (!costs || costs[targetOrbit.key] === undefined) {
+                this.addMessage('Transfer not available.', '#ff4444');
+                return false;
+            }
+            const transferCost = costs[targetOrbit.key];
+            if (!sat.canAfford(transferCost)) {
+                this.addMessage(`Insufficient ΔV for Hohmann transfer (need ${transferCost}).`, '#ff8800');
+                return false;
+            }
+            if (this._startHohmannTransfer(sat, targetOrbit)) {
+                this.addMessage(
+                    `SAT-${sat.id} executing Hohmann transfer → ${targetOrbit.name} (ΔV −${transferCost})`,
+                    '#ffdd44'
+                );
+                return true;
+            }
+            return false;
+        }
+
         if (type === 'intercept' || type === 'escort' || type === 'body_block') {
             if (sat.type !== 'rpo') {
                 this.addMessage('Only RPO satellites can intercept / escort.', '#ffaa44');
@@ -466,20 +673,64 @@ class Game {
             return true;
         }
 
+        if (type === 'refuel' || type === 'defend') {
+            if (sat.type !== 'maintenance') {
+                this.addMessage('Only maintenance satellites can refuel / defend.', '#ffaa44');
+                return false;
+            }
+            sat.spend(cost);
+            sat.task   = { type, targetId };
+            sat.mode   = type;
+            sat.refuelTimer = 0;
+            sat.status = type === 'refuel' ? 'refueling' : 'defending';
+            const desc = type === 'refuel' ? `refueling SAT-${targetId}` : `defending SAT-${targetId}`;
+            this.addMessage(`MAINT-${sat.id} tasked: ${desc}. (ΔV −${cost})`, '#88ffdd');
+            return true;
+        }
+
         if (type === 'return') {
-            // Clear escort link
             if (sat.task && sat.task.type === 'escort') {
                 const escortee = this.satellites.find(s => s.id === sat.task.targetId);
                 if (escortee) escortee.escortedById = null;
             }
             sat.task   = null;
             sat.status = 'nominal';
-            sat.mode   = 'patrol';
-            this.addMessage(`RPO-${sat.id} returned to patrol.`, '#88ccff');
+            sat.mode   = sat.type === 'maintenance' ? 'standby' : 'patrol';
+            sat.refueling = false;
+            this.addMessage(`SAT-${sat.id} returned to standby.`, '#88ccff');
             return true;
         }
 
         return false;
+    }
+
+    // ── Public: Activate Jammer ───────────────────────────────────────────────
+
+    activateJammer(stationId) {
+        const gs = this.groundStations.find(g => g.id === stationId);
+        if (!gs) return false;
+        if (gs.jamCooldown > 0) {
+            this.addMessage(`${gs.name}: jammer on cooldown (${Math.ceil(gs.jamCooldown)}s).`, '#ffaa44');
+            return false;
+        }
+        if (this.money < CONFIG.JAM_COST) {
+            this.addMessage(`Insufficient funds for jamming (₡${CONFIG.JAM_COST}).`, '#ffaa44');
+            return false;
+        }
+
+        this.money -= CONFIG.JAM_COST;
+        gs.jamActive   = true;
+        gs.jamTimer    = CONFIG.JAM_DURATION;
+        gs.jamCooldown = CONFIG.JAM_COOLDOWN;
+        this.activeJammers.push({
+            stationId: gs.id,
+            x: gs.x,
+            y: gs.y,
+            timer: CONFIG.JAM_DURATION,
+            radius: CONFIG.JAM_RADIUS,
+        });
+        this.addMessage(`📡 ${gs.name}: COMMS JAMMER ACTIVATED (${CONFIG.JAM_DURATION}s)`, '#ff88ff');
+        return true;
     }
 
     // ── Public: Launch Rocket ─────────────────────────────────────────────────
@@ -490,14 +741,22 @@ class Game {
             this.addMessage(`Insufficient funds — need ₡${Utils.formatMoney(cost)}.`, '#ffaa44');
             return false;
         }
+        if (station.availableSlots <= 0) {
+            this.addMessage(`${station.name}: no launch slots available.`, '#ffaa44');
+            return false;
+        }
+
         this.money -= cost;
+        station.useSlot(30);
 
         const orbit = CONFIG.ORBITS[orbitKey];
         const angle = Utils.rand(0, Math.PI * 2);
         let payload;
-        if      (payloadType === 'utility') payload = new UtilitySat(orbit, angle);
-        else if (payloadType === 'rpo')     payload = new RPOSat(orbit, angle);
-        else                                payload = new RelaySat(orbit, angle);
+        if      (payloadType === 'utility')     payload = new UtilitySat(orbit, angle);
+        else if (payloadType === 'rpo')         payload = new RPOSat(orbit, angle);
+        else if (payloadType === 'relay')       payload = new RelaySat(orbit, angle);
+        else if (payloadType === 'maintenance') payload = new MaintenanceSat(orbit, angle);
+        else                                    payload = new RelaySat(orbit, angle);
 
         this.rockets.push(new LaunchRocket(station, payload));
         this.addMessage(
@@ -506,6 +765,11 @@ class Game {
         );
         return true;
     }
+
+    // ── Zoom ──────────────────────────────────────────────────────────────────
+
+    zoomIn()  { this.zoom = Math.min(CONFIG.ZOOM_MAX, this.zoom + CONFIG.ZOOM_STEP); }
+    zoomOut() { this.zoom = Math.max(CONFIG.ZOOM_MIN, this.zoom - CONFIG.ZOOM_STEP); }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -527,4 +791,5 @@ class Game {
     get playerSatellites() { return this.satellites.filter(s => s.faction === 'player' && s.alive); }
     get utilitySats()       { return this.satellites.filter(s => s.type === 'utility' && s.alive); }
     get enemySats()         { return this.satellites.filter(s => s.faction === 'enemy' && s.alive); }
+    get maintenanceSats()   { return this.satellites.filter(s => s.type === 'maintenance' && s.alive); }
 }
