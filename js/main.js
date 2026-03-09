@@ -19,6 +19,10 @@ function init() {
     document.getElementById('btn4x').addEventListener('click', () => { speedMultiplier = 4; _updateSpeedBtns(); });
     _updateSpeedBtns();
 
+    // Zoom buttons
+    document.getElementById('btnZoomIn').addEventListener('click', () => game.zoomIn());
+    document.getElementById('btnZoomOut').addEventListener('click', () => game.zoomOut());
+
     requestAnimationFrame(loop);
 }
 

@@ -133,6 +133,7 @@ html, body {
 .ico.ut { background: #44ccff; border: 1px solid #44ccff; }
 .ico.rp { background: #44ff88; transform: rotate(45deg); width: 8px; height: 8px; }
 .ico.rl { background: #ffdd44; border: 1px solid #ffdd44; border-radius: 2px; }
+.ico.mn { background: #88ffdd; border: 1px solid #88ffdd; border-radius: 50%; }
 .ico.en { width: 0; height: 0; background: none; border-left: 5px solid transparent; border-right: 5px solid transparent; border-bottom: 9px solid #ff4444; }
 
 /* ── Delta-V Bar ──────────────────────────────────────────────────────────── */
@@ -301,3 +302,17 @@ html, body {
     cursor: pointer;
 }
 .bar-btn:hover { background: rgba(20,60,120,0.9); color: #aaddff; }
+
+/* ── Jam Button ─────────────────────────────────────────────────────────────── */
+.jam-btn {
+    border-color: rgba(255,136,255,0.3) !important;
+    color: #ff88ff !important;
+}
+.jam-btn:hover:not(:disabled) {
+    background: rgba(80,20,80,0.8) !important;
+    border-color: rgba(255,136,255,0.7) !important;
+}
+.jam-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
