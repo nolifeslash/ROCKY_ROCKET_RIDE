@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rocky Rocket Ride — Space RPO Tactics</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ── Main game area ─────────────────────────────────────────────────── -->
+  <div id="gameArea">
+
+    <div id="canvasWrapper">
+      <canvas id="gameCanvas"></canvas>
+    </div>
+
+    <!-- ── Right command panel ──────────────────────────────────────────── -->
+    <div id="sidePanel">
+      <div id="taskPanel">
+        <!-- Populated by ui.js -->
+      </div>
+      <div id="launchPanel">
+        <!-- Populated by ui.js -->
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ── Bottom launch bar ──────────────────────────────────────────────── -->
+  <div id="launchBar">
+    <button id="btnLaunch">🚀 LAUNCH ROCKET</button>
+    <span>Select a ground station and payload in the panel above, then confirm.</span>
+  </div>
+
+</div>
+
+<!-- Scripts — load order matters (no bundler) -->
+<script src="js/config.js"></script>
+<script src="js/utils.js"></script>
+<script src="js/entities.js"></script>
+<script src="js/comms.js"></script>
+<script src="js/ai.js"></script>
+<script src="js/game.js"></script>
+<script src="js/renderer.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/main.js"></script>
+
+</body>
+</html>
