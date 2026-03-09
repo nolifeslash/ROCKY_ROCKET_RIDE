@@ -4,7 +4,7 @@ const AI = {
     /**
      * Update all enemy RPO-sats using coverage-aware targeting.
      * Enemies prefer: out-of-comms targets, low delta-v, unescorted, same orbit.
-     * Orbit transfers happen gradually (enemy commits after being on orbit for a while).
+     * Jammed enemies are slowed and less effective.
      */
     updateEnemySats(enemySats, allSats, dt) {
         const utilMap = {};
@@ -14,29 +14,43 @@ const AI = {
         for (const enemy of enemySats) {
             if (!enemy.alive) continue;
 
+            // Jammed enemies lose targeting temporarily
+            if (enemy._jammed) {
+                enemy._jammed = false;
+                enemy.targetId = null;
+                enemy.angle = Utils.normalizeAngle(enemy.angle + enemy.angularVelocity * dt);
+                enemy._updatePos();
+                continue;
+            }
+
             const targets = Object.values(utilMap);
             if (targets.length === 0) continue;
 
-            // Score targets — higher = better for enemy
+            // Score targets
             let bestTarget = null, bestScore = -Infinity;
             for (const t of targets) {
                 let score = 0;
-                if (!t.inComms)           score += 5;          // hard to command
-                score += (1 - t.deltaVPct) * 3;               // low dV = can't dodge
-                if (t.orbit.key === enemy.orbit.key) score += 4; // same orbit = easy approach
-                score -= Utils.dist(enemy.x, enemy.y, t.x, t.y) * 0.008; // closer = better
-                if (t.escortedById)       score -= 2;          // defended target less attractive
+                if (!t.inComms)           score += 5;
+                score += (1 - t.deltaVPct) * 3;
+                if (t.orbit.key === enemy.orbit.key) score += 4;
+                score -= Utils.dist(enemy.x, enemy.y, t.x, t.y) * 0.008;
+                if (t.escortedById)       score -= 2;
+                if (t.lowPower)           score += 2;   // low power = vulnerable
                 if (score > bestScore) { bestScore = score; bestTarget = t; }
             }
 
             if (bestTarget) {
-                // Orbit transfer: only switch if target is on a different orbit AND
-                // the enemy has been on its current orbit for a while (avoid immediate jump)
                 if (enemy.orbit.key !== bestTarget.orbit.key) {
                     enemy._orbitTransferTimer = (enemy._orbitTransferTimer || 0) + dt;
-                    if (enemy._orbitTransferTimer > 8) {   // commit after 8 s on wrong orbit
-                        enemy.orbit               = bestTarget.orbit;
-                        enemy.angularVelocity     = Utils.angularVelocity(enemy.orbit.period);
+                    if (enemy._orbitTransferTimer > 8) {
+                        // Use Hohmann-style transfer for enemies too
+                        if (!enemy.transferring) {
+                            enemy.transferring     = true;
+                            enemy.transferFromOrbit = enemy.orbit;
+                            enemy.transferTarget   = bestTarget.orbit;
+                            enemy.transferProgress = 0;
+                            enemy.transferDuration = CONFIG.HOHMANN_TRANSFER_TIME * 1.2;
+                        }
                         enemy._orbitTransferTimer = 0;
                     }
                 } else {
