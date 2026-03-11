@@ -92,6 +92,22 @@ const UI = {
                 e.preventDefault();
                 g.paused = !g.paused;
                 break;
+            case 'tab':
+                e.preventDefault();
+                this._cycleSelection(e.shiftKey ? -1 : 1, false);
+                break;
+            case '.':
+                this._cycleSelection(1, false);
+                break;
+            case ',':
+                this._cycleSelection(-1, false);
+                break;
+            case 'e':
+                this._cycleSelection(1, true);
+                break;
+            case 'q':
+                this._cycleSelection(-1, true);
+                break;
             case 'escape':
                 g.selectedSat = null;
                 this.refresh();
@@ -140,8 +156,9 @@ const UI = {
         const sat   = this.game.selectedSat;
         const panel = document.getElementById('taskPanel');
         panel.innerHTML = sat && sat.alive
-            ? this._satInfoHTML(sat) + this._tasksHTML(sat)
-            : this._noSelHTML();
+            ? this._satInfoHTML(sat) + this._tasksHTML(sat) + this._catalogHTML()
+            : this._noSelHTML() + this._catalogHTML();
+        this._bindCatalogBtns();
     },
 
     // ── No-selection panel ────────────────────────────────────────────────────
@@ -149,10 +166,28 @@ const UI = {
     _noSelHTML() {
         const sc = this.game.scenario;
         const obj = sc && sc.objectives.length > 0 ? sc.objectives[0] : null;
+        const player = this.game.playerSatellites;
+        const utils = player.filter(s => s.type === 'utility').length;
+        const relays = player.filter(s => s.type === 'relay').length;
+        const rpos = player.filter(s => s.type === 'rpo').length;
+        const maint = player.filter(s => s.type === 'maintenance').length;
+        const inSun = player.filter(s => s.inSunlight).length;
+        const sec = Math.floor(this.game.time);
+        const mm  = String(Math.floor(sec / 60)).padStart(2, '0');
+        const ss  = String(sec % 60).padStart(2, '0');
+        const net = this.game.lastNetIncome;
+        const sunDeg = Math.floor((Utils.normalizeAngle(this.game.sunAngle) * 180) / Math.PI);
         return `
         <div class="panel-title">RPO COMMAND</div>
         ${obj ? `<div class="panel-info obj-box">📋 ${obj.label}</div>` : ''}
-        <div class="panel-hint">Click a satellite to select it.</div>
+        <div class="panel-hint">Click or catalog-select a satellite to inspect and command it.</div>
+        <hr class="phr"/>
+        <div class="panel-sub">SIM SNAPSHOT</div>
+        <div class="panel-info">Mission clock: <b>${mm}:${ss}</b></div>
+        <div class="panel-info">Net flow: <span class="${net >= 0 ? 'green' : 'red'}"><b>${net >= 0 ? '+' : ''}${net.toFixed(1)}/s</b></span></div>
+        <div class="panel-info">Constellation: <b>${player.length}</b> (${utils} utility / ${rpos} rpo / ${relays} relay / ${maint} maint)</div>
+        <div class="panel-info">Hazards: <span class="orange">${this.game.debris.length} debris</span> / <span class="red">${this.game.enemySats.length + this.game.asats.length} hostile</span></div>
+        <div class="panel-info">Solar geometry: <b>${sunDeg}°</b> sun angle — <b>${inSun}/${player.length || 0}</b> sats in sunlight</div>
         <hr class="phr"/>
         <div class="panel-sub">LEGEND</div>
         <div class="panel-legend">
@@ -167,6 +202,9 @@ const UI = {
         <div class="panel-hint">
           [C] Toggle coverage overlay<br/>
           [T] Toggle threat arrows<br/>
+          [Tab]/[Shift+Tab] Cycle all sats<br/>
+          [,]/[.] Cycle all sats<br/>
+          [Q]/[E] Cycle friendlies<br/>
           [+/-] Zoom in/out<br/>
           [Mouse wheel] Zoom
         </div>
@@ -217,16 +255,23 @@ const UI = {
         const transferRow = sat.transferring
             ? `<div class="panel-info" style="color:#ffdd44">⟳ TRANSFERRING → ${sat.transferTarget ? sat.transferTarget.name : '?'} (${Math.round(sat.transferProgress * 100)}%)</div>`
             : '';
+        const angularDriftDegPerMin = ((sat.angularVelocity * 180 / Math.PI) * 60).toFixed(2);
+        const cooldownRow = sat.maneuverCooldown > 0
+            ? `<div class="panel-info">Maneuver cooldown: <b style="color:#ffaa44">${sat.maneuverCooldown.toFixed(1)}s</b></div>`
+            : '<div class="panel-info">Maneuver cooldown: <b class="green">READY</b></div>';
 
         return `
         <div class="panel-title">SAT-${sat.id} — ${sat.type.toUpperCase()}</div>
         <div class="panel-info">Orbit: <b>${sat.orbit.name}</b></div>
+        <div class="panel-info">Track radius: <b>${Math.round(sat.effectiveRadius)}</b> u</div>
+        <div class="panel-info">Angular drift: <b>${angularDriftDegPerMin}°/min</b></div>
         ${subRow}
         <div class="panel-info">Faction: <span class="${factionColor}"><b>${factionLabel}</b></span></div>
         <div class="panel-info">Comms: <span class="${commsColor}">${commsLabel}</span></div>
         <div class="panel-info">Health: <b>${Math.max(0, Math.floor(sat.health))}%</b></div>
         ${svcRow}
         ${powerRow}
+        ${cooldownRow}
         <div class="panel-info">Task: <span class="cyan">${taskLabel}</span></div>
         ${transferRow}
         <hr class="phr"/>
@@ -482,6 +527,57 @@ const UI = {
         if (this.game.launchRocket(station, payload, orbit)) {
             document.getElementById('launchPanel').style.display = 'none';
         }
+        this.refresh();
+    },
+
+    _catalogHTML() {
+        const sats = this.game.satellites
+            .filter(s => s.alive)
+            .sort((a, b) => {
+                if (a.faction !== b.faction) return a.faction === 'player' ? -1 : 1;
+                if (a.type !== b.type) return a.type.localeCompare(b.type);
+                return a.id - b.id;
+            });
+        if (sats.length === 0) return '';
+        const rows = sats.map(s => {
+            const isSel = this.game.selectedSat && this.game.selectedSat.id === s.id;
+            const tag = `${s.faction === 'player' ? 'FR' : 'EN'} · ${s.type.slice(0, 4).toUpperCase()}`;
+            const warn = s.faction === 'player' && (s.noPower || !s.inComms || s.deltaVWarning !== 'ok');
+            return `<button class="catalog-btn ${isSel ? 'is-selected' : ''}" data-sat-id="${s.id}">
+                <span>SAT-${s.id} <span class="${s.faction === 'player' ? 'green' : 'red'}">${tag}</span></span>
+                <span class="${warn ? 'orange' : 'panel-hint'}">${s.orbit.key}</span>
+            </button>`;
+        }).join('');
+        return `
+            <hr class="phr"/>
+            <div class="panel-sub">SAT CATALOG</div>
+            <div class="panel-hint">[Tab]/[,]/[.] all &nbsp; [Q]/[E] friendly</div>
+            <div class="catalog-list">${rows}</div>`;
+    },
+
+    _bindCatalogBtns() {
+        const panel = document.getElementById('taskPanel');
+        panel.querySelectorAll('.catalog-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const satId = parseInt(btn.dataset.satId);
+                const sat = this.game.satellites.find(s => s.id === satId && s.alive) || null;
+                this.game.selectedSat = sat;
+                this.refresh();
+            });
+        });
+    },
+
+    _cycleSelection(direction, friendlyOnly) {
+        const sats = this.game.satellites
+            .filter(s => s.alive && (!friendlyOnly || s.faction === 'player'))
+            .sort((a, b) => a.id - b.id);
+        if (sats.length === 0) return;
+        const selectedId = this.game.selectedSat ? this.game.selectedSat.id : null;
+        const idx = sats.findIndex(s => s.id === selectedId);
+        const nextIdx = idx === -1
+            ? (direction > 0 ? 0 : sats.length - 1)
+            : (idx + direction + sats.length) % sats.length;
+        this.game.selectedSat = sats[nextIdx];
         this.refresh();
     },
 };

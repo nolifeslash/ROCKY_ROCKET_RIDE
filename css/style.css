@@ -210,6 +210,35 @@ html, body {
 .btn-post-dv { display: block; font-size: 8px; color: #44aaff; margin-top: 1px; }
 .btn-post-dv.warn-crit { color: #ff4444; }
 
+.catalog-list {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    margin-top: 4px;
+}
+.catalog-btn {
+    width: 100%;
+    background: rgba(6, 20, 42, 0.95);
+    border: 1px solid rgba(68,170,255,0.2);
+    border-radius: 3px;
+    color: #88bbdd;
+    font-family: 'Courier New', monospace;
+    font-size: 9px;
+    padding: 3px 5px;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+.catalog-btn:hover {
+    background: rgba(18, 46, 88, 0.92);
+    border-color: rgba(68,200,255,0.55);
+}
+.catalog-btn.is-selected {
+    border-color: rgba(68,255,136,0.65);
+    color: #bfffe0;
+}
+
 /* ── Bottom Launch Bar ────────────────────────────────────────────────────── */
 #launchBar {
     height: 38px;

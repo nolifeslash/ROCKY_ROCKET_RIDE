@@ -822,7 +822,7 @@ const Renderer = {
         ctx.fillStyle  = '#446688';
         ctx.font       = '9px monospace';
         ctx.textAlign  = 'right';
-        ctx.fillText(`ZOOM: ${(game.zoom * 100).toFixed(0)}%  [C] coverage  [T] threats  [Space] pause  [+/-] zoom`, W - 10, 14);
+        ctx.fillText(`ZOOM: ${(game.zoom * 100).toFixed(0)}%  [Tab]/[,][.] select  [Q/E] friendly  [C] coverage  [T] threats  [+/-] zoom  [Space] pause`, W - 10, 14);
 
         // Scenario objective progress bar
         const sc = game.scenario;
