@@ -185,7 +185,7 @@ const UI = {
         <div class="panel-sub">SIM SNAPSHOT</div>
         <div class="panel-info">Mission clock: <b>${mm}:${ss}</b></div>
         <div class="panel-info">Net flow: <span class="${net >= 0 ? 'green' : 'red'}"><b>${net >= 0 ? '+' : ''}${net.toFixed(1)}/s</b></span></div>
-        <div class="panel-info">Constellation: <b>${player.length}</b> (${utils} UTI / ${rpos} RPO / ${relays} REL / ${maint} MNT)</div>
+        <div class="panel-info">Constellation: <b>${player.length}</b> (${utils} utility / ${rpos} rpo / ${relays} relay / ${maint} maint)</div>
         <div class="panel-info">Hazards: <span class="orange">${this.game.debris.length} debris</span> / <span class="red">${this.game.enemySats.length + this.game.asats.length} hostile</span></div>
         <div class="panel-info">Solar geometry: <b>${sunDeg}°</b> sun angle — <b>${inSun}/${player.length || 0}</b> sats in sunlight</div>
         <hr class="phr"/>
@@ -255,7 +255,7 @@ const UI = {
         const transferRow = sat.transferring
             ? `<div class="panel-info" style="color:#ffdd44">⟳ TRANSFERRING → ${sat.transferTarget ? sat.transferTarget.name : '?'} (${Math.round(sat.transferProgress * 100)}%)</div>`
             : '';
-        const driftDegPerMin = ((sat.angularVelocity * 180 / Math.PI) * 60).toFixed(2);
+        const angularDriftDegPerMin = ((sat.angularVelocity * 180 / Math.PI) * 60).toFixed(2);
         const cooldownRow = sat.maneuverCooldown > 0
             ? `<div class="panel-info">Maneuver cooldown: <b style="color:#ffaa44">${sat.maneuverCooldown.toFixed(1)}s</b></div>`
             : '<div class="panel-info">Maneuver cooldown: <b class="green">READY</b></div>';
@@ -264,7 +264,7 @@ const UI = {
         <div class="panel-title">SAT-${sat.id} — ${sat.type.toUpperCase()}</div>
         <div class="panel-info">Orbit: <b>${sat.orbit.name}</b></div>
         <div class="panel-info">Track radius: <b>${Math.round(sat.effectiveRadius)}</b> u</div>
-        <div class="panel-info">Angular drift: <b>${driftDegPerMin}°/min</b></div>
+        <div class="panel-info">Angular drift: <b>${angularDriftDegPerMin}°/min</b></div>
         ${subRow}
         <div class="panel-info">Faction: <span class="${factionColor}"><b>${factionLabel}</b></span></div>
         <div class="panel-info">Comms: <span class="${commsColor}">${commsLabel}</span></div>
